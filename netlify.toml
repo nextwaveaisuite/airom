@@ -14,3 +14,12 @@
 
 [functions]
   node_bundler = "esbuild"
+
+[functions."generate-ebook"]
+  timeout = 60
+
+[functions."generate-image"]
+  timeout = 30
+
+[functions."chat"]
+  timeout = 30
