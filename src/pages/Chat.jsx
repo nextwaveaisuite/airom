@@ -139,7 +139,7 @@ export default function Chat() {
     setInput('')
     addAIMessage('🎨 Generating your image — this takes about 10 seconds…')
     try {
-      const res  = await fetch('/.netlify/functions/generateImage', {
+      const res  = await fetch('/.netlify/functions/generate-image', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt, userId: user.id })
       })
@@ -167,7 +167,7 @@ ${data.revisedPrompt ? `*Prompt used: ${data.revisedPrompt}*` : ''}`, id: Date.n
       const topic = prompt.replace(/^(create|write|generate|make)\s+(an?\s+)?(ebook|e-book|book|guide|manual|report|whitepaper)\s+(about|on|for|titled)?\s*/i, '').trim()
       const controller = new AbortController()
       const timeout    = setTimeout(() => controller.abort(), 90000) // 90 second timeout
-      const res = await fetch('/.netlify/functions/generateEbook', {
+      const res = await fetch('/.netlify/functions/generate-ebook', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic: topic || prompt, chapters: 5, userId: user.id }),
