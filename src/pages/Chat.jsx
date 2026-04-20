@@ -183,9 +183,9 @@ ${data.revisedPrompt ? `*Prompt used: ${data.revisedPrompt}*` : ''}`, id: Date.n
       ])
     } catch (err) {
       if (err.name === 'AbortError') {
-        setError('eBook generation timed out. Please try again with a simpler topic.')
+        setError('eBook generation timed out. Please try again.')
       } else {
-        setError('eBook generation failed. Please try again.')
+        setError('eBook error: ' + err.message)
       }
       setMessages(m => m.slice(0, -2))
     }
