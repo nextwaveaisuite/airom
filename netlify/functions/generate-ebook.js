@@ -1,6 +1,4 @@
 // netlify/functions/generate-ebook.js
-// Generates structured eBook content using Claude
-
 const Anthropic = require('@anthropic-ai/sdk')
 const { createClient } = require('@supabase/supabase-js')
 
@@ -11,7 +9,7 @@ exports.handler = async (event) => {
   try { body = JSON.parse(event.body) }
   catch { return { statusCode: 400, body: JSON.stringify({ error: 'Invalid JSON' }) } }
 
-  const { topic, chapters = 5, audience = 'general', userId } = body
+  const { topic, userId } = body
   if (!topic || !userId) return { statusCode: 400, body: JSON.stringify({ error: 'Missing topic or userId' }) }
 
   const supabase = createClient(process.env.VITE_SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
@@ -24,46 +22,42 @@ exports.handler = async (event) => {
   try {
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
-    const prompt = `Create a comprehensive, well-structured eBook about: "${topic}"
-
-Target audience: ${audience}
-Number of chapters: ${chapters}
-
-Please structure your response as valid JSON with this exact format:
-{
-  "title": "Full eBook Title",
-  "subtitle": "Compelling subtitle",
-  "author": "Airom AI",
-  "description": "2-3 sentence description of the eBook",
-  "introduction": "Engaging introduction paragraph that hooks the reader",
-  "chapters": [
-    {
-      "number": 1,
-      "title": "Chapter Title",
-      "summary": "One sentence summary",
-      "content": "Full chapter content with multiple paragraphs. Aim for 400-600 words per chapter.",
-      "keyPoints": ["Key point 1", "Key point 2", "Key point 3"]
-    }
-  ],
-  "conclusion": "Compelling conclusion paragraph"
-}
-
-Make the content engaging, informative, and professional. Each chapter should flow naturally into the next.`
-
+    // Faster: ask for shorter chapters, strict JSON only
     const response = await client.messages.create({
-      model:     'claude-sonnet-4-20250514',
-      max_tokens: 8000,
-      messages:  [{ role: 'user', content: prompt }]
+      model:      'claude-sonnet-4-20250514',
+      max_tokens: 4000,
+      messages: [{
+        role: 'user',
+        content: `Write a 5-chapter eBook about: "${topic}"
+
+Respond with ONLY valid JSON, no other text, no markdown, no explanation. Use this exact structure:
+{"title":"...","subtitle":"...","description":"...","introduction":"...","chapters":[{"number":1,"title":"...","summary":"...","content":"...","keyPoints":["...","...","..."]}],"conclusion":"..."}
+
+Keep each chapter content to 200 words maximum. Be concise and practical.`
+      }]
     })
 
-    const text      = response.content[0].text
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) throw new Error('Failed to generate structured eBook content')
+    const text = response.content[0].text.trim()
 
-    const ebookData = JSON.parse(jsonMatch[0])
+    // Try to parse JSON - handle cases where model adds extra text
+    let ebookData
+    try {
+      ebookData = JSON.parse(text)
+    } catch {
+      // Try to extract JSON if wrapped in other text
+      const match = text.match(/\{[\s\S]*\}/)
+      if (!match) {
+        console.error('Raw response:', text.slice(0, 500))
+        return { statusCode: 500, body: JSON.stringify({ error: 'Failed to parse eBook structure. Please try again.' }) }
+      }
+      ebookData = JSON.parse(match[0])
+    }
 
+    // Deduct credits
     await supabase.rpc('deduct_credits', { user_id: userId, amount: 20 })
-    await supabase.from('transactions').insert({ user_id: userId, type: 'usage', credits_delta: -20, description: `eBook: ${topic}` })
+    await supabase.from('transactions').insert({
+      user_id: userId, type: 'usage', credits_delta: -20, description: `eBook: ${topic}`
+    })
 
     return {
       statusCode: 200,
@@ -71,7 +65,7 @@ Make the content engaging, informative, and professional. Each chapter should fl
       body: JSON.stringify({ ebook: ebookData, creditCost: 20 })
     }
   } catch (err) {
-    console.error('eBook generation error:', err)
-    return { statusCode: 500, body: JSON.stringify({ error: err.message }) }
+    console.error('eBook error:', err.message)
+    return { statusCode: 500, body: JSON.stringify({ error: 'eBook generation failed: ' + err.message }) }
   }
 }
