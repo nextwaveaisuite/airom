@@ -19,6 +19,7 @@ exports.handler = async (event) => {
   const { createClient } = require('@supabase/supabase-js')
   const supabase = createClient(process.env.VITE_SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
 
+  // Check user has credits (image generation costs 5 credits)
   const { data: profile } = await supabase.from('profiles').select('credits').eq('id', userId).single()
   if (!profile || profile.credits < 5) {
     return { statusCode: 402, body: JSON.stringify({ error: 'Not enough credits. Image generation costs 5 credits.' }) }
@@ -34,11 +35,14 @@ exports.handler = async (event) => {
     const data = await response.json()
     if (!response.ok) throw new Error(data.error?.message || 'Image generation failed')
 
-    const imageUrl      = data.data[0].url
+    const imageUrl = data.data[0].url
     const revisedPrompt = data.data[0].revised_prompt
 
+    // Deduct 5 credits
     await supabase.rpc('deduct_credits', { user_id: userId, amount: 5 })
-    await supabase.from('transactions').insert({ user_id: userId, type: 'usage', credits_delta: -5, description: 'Image generation' })
+    await supabase.from('transactions').insert({
+      user_id: userId, type: 'usage', credits_delta: -5, description: 'Image generation'
+    })
 
     return {
       statusCode: 200,
