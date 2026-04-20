@@ -4,10 +4,10 @@ import { useAuth } from '../lib/AuthContext'
 import { supabase } from '../lib/supabase'
 import { LOW_CREDIT_THRESHOLD } from '../lib/plans'
 
-const SUGGESTIONS = ['What can you do?', 'Write me a Python script', 'Explain quantum computing', 'Help me debug code']
+const SUGGESTIONS = ['What can you do?', 'Create an image of a futuristic city', 'Create an eBook about productivity', 'Write me a Python web scraper']
 const ACCEPTED_FILES = '.pdf,.txt,.md,.js,.jsx,.ts,.tsx,.py,.java,.cpp,.c,.cs,.go,.rs,.html,.css,.json,.csv,.xml,.yaml,.yml,.sh,.sql'
 const IMAGE_TYPES = ['image/png','image/jpeg','image/gif','image/webp']
-const MAX_FILE_MB = 10
+const MAX_FILE_MB = 32
 
 const LANGUAGES = [
   'English','Spanish','French','German','Portuguese','Italian','Dutch','Russian',
@@ -79,9 +79,16 @@ export default function Chat() {
 
   async function loadConversation(conv) {
     setActiveConvId(conv.id); setError(''); historyRef.current = []
-    const { data } = await supabase.from('messages').select('role, content, created_at').eq('conversation_id', conv.id).order('created_at', { ascending: true })
-    setMessages((data || []).map(m => ({ role: m.role === 'assistant' ? 'ai' : 'user', text: m.content, id: m.created_at })))
-    historyRef.current = (data || []).map(m => ({ role: m.role, content: m.content }))
+    // Fetch ALL messages — no limit — so Airom can recall the full conversation
+    const { data } = await supabase
+      .from('messages')
+      .select('role, content, created_at')
+      .eq('conversation_id', conv.id)
+      .order('created_at', { ascending: true })
+    const msgs = data || []
+    setMessages(msgs.map(m => ({ role: m.role === 'assistant' ? 'ai' : 'user', text: m.content, id: m.created_at })))
+    // Store full history for memory recall
+    historyRef.current = msgs.map(m => ({ role: m.role, content: m.content }))
     setSidebarOpen(false)
   }
 
@@ -125,10 +132,73 @@ export default function Chat() {
   function onDrop(e) { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files?.length) handleFiles(e.dataTransfer.files) }
   function removeAttachment(idx) { setAttachments(a => a.filter((_, i) => i !== idx)) }
 
+  // ── Image generation ────────────────────────────────────────────────────
+  async function generateImage(prompt) {
+    setLoading(true)
+    setMessages(m => [...m, { role: 'user', text: prompt, id: Date.now() }])
+    setInput('')
+    addAIMessage('🎨 Generating your image — this takes about 10 seconds…')
+    try {
+      const res  = await fetch('/.netlify/functions/generate-image', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, userId: user.id })
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.error); setMessages(m => m.slice(0, -2)); setLoading(false); return }
+      setCredits(c => Math.max(0, c - data.creditCost))
+      // Replace the "generating" message with the actual image
+      setMessages(m => [
+        ...m.slice(0, -1),
+        { role: 'ai', text: `🎨 Here's your image!
+
+${data.revisedPrompt ? `*Prompt used: ${data.revisedPrompt}*` : ''}`, id: Date.now(), imageUrl: data.imageUrl }
+      ])
+    } catch { setError('Image generation failed. Please try again.'); setMessages(m => m.slice(0, -2)) }
+    setLoading(false)
+  }
+
+  // ── eBook generation ─────────────────────────────────────────────────────
+  async function generateEbook(prompt) {
+    setLoading(true)
+    setMessages(m => [...m, { role: 'user', text: prompt, id: Date.now() }])
+    setInput('')
+    addAIMessage('📚 Creating your eBook — writing chapters now, this takes about 30 seconds…')
+    try {
+      // Extract topic from prompt
+      const topic = prompt.replace(/^(create|write|generate|make)\s+(an?\s+)?(ebook|e-book|book|guide|manual|report|whitepaper)\s+(about|on|for|titled)?\s*/i, '').trim()
+      const res   = await fetch('/.netlify/functions/generate-ebook', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic: topic || prompt, chapters: 5, userId: user.id })
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.error); setMessages(m => m.slice(0, -2)); setLoading(false); return }
+      setCredits(c => Math.max(0, c - data.creditCost))
+      setMessages(m => [
+        ...m.slice(0, -1),
+        { role: 'ai', text: `📚 Your eBook is ready!`, id: Date.now(), ebook: data.ebook }
+      ])
+    } catch { setError('eBook generation failed. Please try again.'); setMessages(m => m.slice(0, -2)) }
+    setLoading(false)
+  }
+
   async function send(text) {
     if ((!text.trim() && attachments.length === 0) || loading) return
     setError('')
     if (credits <= 0) { setError('No credits left. Please top up to continue.'); return }
+
+    // Detect image generation request
+    const imageKeywords = /^(create|generate|make|draw|design|paint|illustrate|produce)\s+(an?\s+)?(image|picture|photo|illustration|artwork|drawing|painting|graphic|logo|banner|thumbnail|portrait|landscape)/i
+    if (text.trim() && imageKeywords.test(text.trim()) && attachments.length === 0) {
+      await generateImage(text.trim())
+      return
+    }
+
+    // Detect eBook request
+    const ebookKeywords = /^(create|write|generate|make)\s+(an?\s+)?(ebook|e-book|book|guide|manual|report|whitepaper)/i
+    if (text.trim() && ebookKeywords.test(text.trim()) && attachments.length === 0) {
+      await generateEbook(text.trim())
+      return
+    }
     const userText = text.trim()
     const sentAttachments = [...attachments]
     const displayText = sentAttachments.length ? (userText || '') + sentAttachments.map(a => `\n📎 ${a.name}`).join('') : userText
@@ -138,9 +208,18 @@ export default function Chat() {
     setLoading(true)
     historyRef.current.push({ role: 'user', content: userText || 'Please analyze the attached file(s).' })
     try {
+      // Detect memory/recall requests — send full history
+      const memoryKeywords = /remember|recall|earlier|before|previous|back to|what did (i|we|you)|go back|find where|search.*chat|look back|history|start of/i
+      const isMemoryReq = memoryKeywords.test(userText)
+
       const res  = await fetch('/.netlify/functions/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: historyRef.current, userId: user.id, conversationId: activeConvId, attachments: sentAttachments.map(({ name, type, mediaType, data }) => ({ name, type, mediaType, data })) })
+        body: JSON.stringify({
+          messages: isMemoryReq ? historyRef.current : historyRef.current.slice(-40),
+          userId: user.id,
+          conversationId: activeConvId,
+          attachments: sentAttachments.map(({ name, type, mediaType, data }) => ({ name, type, mediaType, data }))
+        })
       })
       const data = await res.json()
       if (!res.ok) { setError(data.error || 'Something went wrong.'); historyRef.current.pop(); setMessages(m => m.slice(0, -1)); setLoading(false); return }
@@ -495,11 +574,22 @@ export default function Chat() {
             </div>
           )}
 
+          <div style={{ width:'100%', maxWidth:860, margin:'0 auto', display:'flex', flexDirection:'column', gap:16 }}>
           {messages.map(m => (
             <div key={m.id} style={{ ...s.msgRow, justifyContent: m.role==='user' ? 'flex-end' : 'flex-start' }}>
               {m.role==='ai' && <div style={s.aiAvatar}>✦</div>}
-              <div style={{ maxWidth:'78%', display:'flex', flexDirection:'column', gap:6, alignItems: m.role==='user' ? 'flex-end' : 'flex-start' }}>
+              <div style={{ maxWidth:'92%', display:'flex', flexDirection:'column', gap:6, alignItems: m.role==='user' ? 'flex-end' : 'flex-start' }}>
                 {m.attachments?.map((src,i) => <img key={i} src={src} alt="attachment" style={{ maxWidth:240, maxHeight:180, borderRadius:10, border:'1px solid var(--border)', objectFit:'cover' }}/>)}
+                {m.imageUrl && (
+                  <div style={{ borderRadius:12, overflow:'hidden', border:'1px solid var(--border)', maxWidth:480 }}>
+                    <img src={m.imageUrl} alt="Generated" style={{ width:'100%', display:'block' }}/>
+                    <div style={{ background:'var(--bg-card)', padding:'8px 12px', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                      <span style={{ fontSize:12, color:'var(--text-muted)' }}>Generated by Airom AI</span>
+                      <a href={m.imageUrl} download="airom-image.png" target="_blank" rel="noreferrer" style={{ fontSize:12, color:'var(--blue-bright)', textDecoration:'none' }}>⬇ Download</a>
+                    </div>
+                  </div>
+                )}
+                {m.ebook && <EbookCard ebook={m.ebook}/>}
                 <div style={m.role==='ai' ? s.aiBubble : s.userBubble}>
                   <MessageText text={m.text}/>
                 </div>
@@ -518,6 +608,7 @@ export default function Chat() {
               </div>
             </div>
           )}
+          </div>
           <div ref={bottomRef}/>
         </div>
 
@@ -534,6 +625,12 @@ export default function Chat() {
         )}
 
         <div style={s.inputWrap}>
+          <div style={{ display:'flex', gap:6, marginBottom:8, flexWrap:'wrap' }}>
+            <button style={s.quickBtn} onClick={() => setInput('Create an image of ')}>🎨 Generate image</button>
+            <button style={s.quickBtn} onClick={() => setInput('Create an eBook about ')}>📚 Create eBook</button>
+            <button style={s.quickBtn} onClick={() => setInput('Write a Python script that ')}>🐍 Python script</button>
+            <button style={s.quickBtn} onClick={() => setInput('Build a website for ')}>🌐 Build website</button>
+          </div>
           <div style={s.inputRow}>
             <button style={s.attachBtn} onClick={() => fileRef.current?.click()} title="Attach file">📎</button>
             <textarea ref={inputRef} value={input} onChange={e => { setInput(e.target.value); e.target.style.height='40px'; e.target.style.height=Math.min(e.target.scrollHeight,140)+'px' }} onKeyDown={onKeyDown} placeholder={credits<=0 ? 'No credits — top up to continue' : 'Message Airom…'} rows={1} style={{ ...s.textarea, opacity:credits<=0?0.5:1 }} disabled={loading||credits<=0}/>
@@ -607,6 +704,121 @@ function CodeBlock({ lang, code }) {
   )
 }
 
+// ── eBook Card Component ─────────────────────────────────────────────────────
+function EbookCard({ ebook }) {
+  const [activeChapter, setActiveChapter] = useState(0)
+
+  function downloadEbook() {
+    // Build HTML eBook
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${ebook.title}</title>
+<style>
+  body { font-family: Georgia, serif; max-width: 800px; margin: 0 auto; padding: 40px 20px; color: #1a1a18; line-height: 1.8; }
+  h1 { font-size: 2.5em; color: #1D4ED8; border-bottom: 3px solid #1D4ED8; padding-bottom: 10px; }
+  h2 { font-size: 1.8em; color: #1D4ED8; margin-top: 40px; }
+  h3 { font-size: 1.3em; color: #374151; }
+  .subtitle { font-size: 1.2em; color: #6B7280; font-style: italic; }
+  .description { background: #EFF6FF; padding: 20px; border-left: 4px solid #1D4ED8; border-radius: 0 8px 8px 0; margin: 20px 0; }
+  .chapter { margin: 40px 0; padding: 30px; background: #F9FAFB; border-radius: 12px; }
+  .key-points { background: #fff; border: 1px solid #E5E7EB; border-radius: 8px; padding: 16px; margin-top: 16px; }
+  .key-points li { margin: 8px 0; color: #374151; }
+  .conclusion { background: #1D4ED8; color: white; padding: 30px; border-radius: 12px; margin-top: 40px; }
+  .footer { text-align: center; color: #9CA3AF; margin-top: 40px; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<h1>${ebook.title}</h1>
+<p class="subtitle">${ebook.subtitle || ''}</p>
+<div class="description">${ebook.description || ''}</div>
+<h2>Introduction</h2>
+<p>${ebook.introduction || ''}</p>
+${(ebook.chapters || []).map(ch => `
+<div class="chapter">
+<h2>Chapter ${ch.number}: ${ch.title}</h2>
+<p><em>${ch.summary || ''}</em></p>
+<p>${(ch.content || '').replace(/\n/g, '</p><p>')}</p>
+${ch.keyPoints?.length ? `<div class="key-points"><h3>Key Points</h3><ul>${ch.keyPoints.map(p => `<li>${p}</li>`).join('')}</ul></div>` : ''}
+</div>`).join('')}
+<div class="conclusion"><h2 style="color:white">Conclusion</h2><p>${ebook.conclusion || ''}</p></div>
+<div class="footer"><p>Generated by Airom AI &bull; ${new Date().toLocaleDateString()}</p></div>
+</body>
+</html>`
+
+    const blob = new Blob([html], { type: 'text/html' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href = url; a.download = `${ebook.title.replace(/[^a-z0-9]/gi, '-')}.html`
+    a.click(); URL.revokeObjectURL(url)
+  }
+
+  return (
+    <div style={{ background:'var(--bg-card)', border:'1px solid var(--border-bright)', borderRadius:14, overflow:'hidden', maxWidth:540, marginTop:8 }}>
+      {/* Header */}
+      <div style={{ background:'linear-gradient(135deg, #1D4ED8, #3B82F6)', padding:'20px 20px 16px' }}>
+        <div style={{ fontSize:11, color:'rgba(255,255,255,0.7)', textTransform:'uppercase', letterSpacing:'0.1em', marginBottom:6 }}>📚 eBook Generated</div>
+        <div style={{ fontSize:18, fontWeight:700, color:'#fff', lineHeight:1.3, marginBottom:4 }}>{ebook.title}</div>
+        {ebook.subtitle && <div style={{ fontSize:13, color:'rgba(255,255,255,0.8)', fontStyle:'italic' }}>{ebook.subtitle}</div>}
+      </div>
+
+      {/* Description */}
+      {ebook.description && (
+        <div style={{ padding:'12px 20px', fontSize:13, color:'var(--text-secondary)', borderBottom:'1px solid var(--border)', fontStyle:'italic' }}>
+          {ebook.description}
+        </div>
+      )}
+
+      {/* Chapter tabs */}
+      <div style={{ display:'flex', overflowX:'auto', borderBottom:'1px solid var(--border)', background:'var(--bg-deep)' }}>
+        <button style={{ padding:'8px 14px', fontSize:11, fontWeight: activeChapter === -1 ? 700 : 400, color: activeChapter === -1 ? 'var(--blue-bright)' : 'var(--text-muted)', background:'none', border:'none', cursor:'pointer', borderBottom: activeChapter === -1 ? '2px solid var(--blue)' : '2px solid transparent', whiteSpace:'nowrap', fontFamily:'inherit' }} onClick={() => setActiveChapter(-1)}>
+          Intro
+        </button>
+        {(ebook.chapters || []).map((ch, i) => (
+          <button key={i} style={{ padding:'8px 14px', fontSize:11, fontWeight: activeChapter === i ? 700 : 400, color: activeChapter === i ? 'var(--blue-bright)' : 'var(--text-muted)', background:'none', border:'none', cursor:'pointer', borderBottom: activeChapter === i ? '2px solid var(--blue)' : '2px solid transparent', whiteSpace:'nowrap', fontFamily:'inherit' }} onClick={() => setActiveChapter(i)}>
+            Ch.{ch.number}
+          </button>
+        ))}
+        <button style={{ padding:'8px 14px', fontSize:11, fontWeight: activeChapter === 99 ? 700 : 400, color: activeChapter === 99 ? 'var(--blue-bright)' : 'var(--text-muted)', background:'none', border:'none', cursor:'pointer', borderBottom: activeChapter === 99 ? '2px solid var(--blue)' : '2px solid transparent', whiteSpace:'nowrap', fontFamily:'inherit' }} onClick={() => setActiveChapter(99)}>
+          Conclusion
+        </button>
+      </div>
+
+      {/* Content */}
+      <div style={{ padding:'16px 20px', maxHeight:240, overflowY:'auto' }}>
+        {activeChapter === -1 && <p style={{ fontSize:13, color:'var(--text-primary)', lineHeight:1.7 }}>{ebook.introduction}</p>}
+        {activeChapter === 99 && <p style={{ fontSize:13, color:'var(--text-primary)', lineHeight:1.7 }}>{ebook.conclusion}</p>}
+        {activeChapter >= 0 && activeChapter < (ebook.chapters || []).length && (() => {
+          const ch = ebook.chapters[activeChapter]
+          return (
+            <div>
+              <div style={{ fontSize:15, fontWeight:600, color:'var(--text-primary)', marginBottom:8 }}>{ch.title}</div>
+              {ch.summary && <div style={{ fontSize:12, color:'var(--blue-bright)', marginBottom:10, fontStyle:'italic' }}>{ch.summary}</div>}
+              <p style={{ fontSize:13, color:'var(--text-primary)', lineHeight:1.7 }}>{ch.content?.slice(0, 400)}…</p>
+              {ch.keyPoints?.length > 0 && (
+                <div style={{ marginTop:10, background:'var(--bg-deep)', borderRadius:8, padding:'10px 14px' }}>
+                  <div style={{ fontSize:11, fontWeight:600, color:'var(--text-muted)', marginBottom:6, textTransform:'uppercase' }}>Key points</div>
+                  {ch.keyPoints.map((p, i) => <div key={i} style={{ fontSize:12, color:'var(--text-secondary)', padding:'2px 0' }}>• {p}</div>)}
+                </div>
+              )}
+            </div>
+          )
+        })()}
+      </div>
+
+      {/* Footer */}
+      <div style={{ padding:'12px 20px', borderTop:'1px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'space-between', background:'var(--bg-deep)' }}>
+        <span style={{ fontSize:12, color:'var(--text-muted)' }}>{(ebook.chapters || []).length} chapters · Generated by Airom</span>
+        <button onClick={downloadEbook} style={{ fontSize:12, padding:'6px 14px', borderRadius:6, background:'var(--blue)', color:'#fff', border:'none', cursor:'pointer', fontWeight:600, fontFamily:'inherit', boxShadow:'0 0 8px var(--blue-glow)' }}>
+          ⬇ Download eBook
+        </button>
+      </div>
+    </div>
+  )
+}
+
 const s = {
   shell:          { display:'flex', height:'100dvh', background:'transparent', position:'relative', zIndex:1, overflow:'hidden' },
   dropOverlay:    { position:'fixed', inset:0, background:'rgba(3,5,15,0.85)', zIndex:100, display:'flex', alignItems:'center', justifyContent:'center', backdropFilter:'blur(8px)' },
@@ -660,7 +872,8 @@ const s = {
   creditBadge:    { border:'1px solid', borderRadius:20, padding:'5px 12px', fontSize:12, fontWeight:600, cursor:'pointer', background:'transparent' },
   iconBtn:        { background:'none', border:'none', color:'var(--text-secondary)', cursor:'pointer', fontSize:16, padding:'4px 6px', borderRadius:6 },
   errorBanner:    { background:'rgba(251,146,60,0.08)', borderBottom:'1px solid rgba(251,146,60,0.2)', padding:'10px 16px', fontSize:13, color:'#FB923C', display:'flex', alignItems:'center', gap:6, flexShrink:0 },
-  messages:       { flex:1, overflowY:'auto', padding:20, display:'flex', flexDirection:'column', gap:16 },
+  messages:       { flex:1, overflowY:'auto', padding:'20px', display:'flex', flexDirection:'column', gap:16 },
+  messagesInner:  { width:'100%', maxWidth:860, margin:'0 auto', display:'flex', flexDirection:'column', gap:16, flex:1 },
   welcome:        { display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', flex:1, textAlign:'center', padding:'40px 20px' },
   welcomeMark:    { width:64, height:64, borderRadius:'50%', background:'var(--blue)', color:'#fff', fontSize:28, display:'flex', alignItems:'center', justifyContent:'center', margin:'0 auto 16px', boxShadow:'0 0 32px var(--blue-glow), 0 0 64px rgba(59,130,246,0.15)' },
   welcomeTitle:   { fontSize:26, fontWeight:700, color:'var(--text-primary)', letterSpacing:'-0.02em', marginBottom:8 },
@@ -670,14 +883,15 @@ const s = {
   msgRow:         { display:'flex', gap:10, alignItems:'flex-start' },
   aiAvatar:       { width:30, height:30, borderRadius:'50%', background:'var(--blue)', color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', fontSize:14, flexShrink:0, boxShadow:'0 0 10px var(--blue-glow)' },
   userAvatarSm:   { width:30, height:30, borderRadius:'50%', background:'var(--bg-hover)', border:'1px solid var(--border-bright)', color:'var(--blue-bright)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:13, fontWeight:600, flexShrink:0 },
-  aiBubble:       { maxWidth:'100%', background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'16px 16px 16px 4px', padding:'10px 14px', fontSize:14, lineHeight:1.65, color:'var(--text-primary)' },
+  aiBubble:       { maxWidth:'100%', background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'16px 16px 16px 4px', padding:'12px 18px', fontSize:14, lineHeight:1.7, color:'var(--text-primary)' },
   userBubble:     { maxWidth:'100%', background:'var(--blue)', color:'#fff', borderRadius:'16px 16px 4px 16px', padding:'10px 14px', fontSize:14, lineHeight:1.65, boxShadow:'0 0 16px var(--blue-glow)' },
   attachmentRow:  { display:'flex', gap:8, padding:'8px 14px', flexWrap:'wrap', borderTop:'1px solid var(--border)', background:'rgba(7,11,26,0.7)' },
   attachmentChip: { display:'flex', alignItems:'center', gap:6, background:'var(--bg-card)', border:'1px solid var(--border-bright)', borderRadius:8, padding:'5px 8px', maxWidth:220 },
-  inputWrap:      { borderTop:'1px solid var(--border)', background:'rgba(7,11,26,0.85)', backdropFilter:'blur(12px)', flexShrink:0, padding:'12px 14px 8px' },
+  inputWrap:      { borderTop:'1px solid var(--border)', background:'rgba(7,11,26,0.85)', backdropFilter:'blur(12px)', flexShrink:0, padding:'12px 20px 8px' },
   inputRow:       { display:'flex', gap:8, alignItems:'flex-end' },
   attachBtn:      { width:40, height:40, borderRadius:10, background:'var(--bg-hover)', border:'1px solid var(--border)', fontSize:18, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 },
   textarea:       { flex:1, height:40, resize:'none', padding:'9px 13px', borderRadius:10, border:'1px solid var(--border)', fontSize:14, lineHeight:1.4, fontFamily:'inherit', background:'var(--bg-input)', color:'var(--text-primary)' },
   sendBtn:        { width:40, height:40, borderRadius:'50%', background:'var(--blue)', color:'#fff', border:'none', fontSize:16, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, boxShadow:'0 0 12px var(--blue-glow)', transition:'all 0.2s', cursor:'pointer' },
-  inputHint:      { fontSize:11, color:'var(--text-muted)', textAlign:'center', marginTop:6 }
+  inputHint:      { fontSize:11, color:'var(--text-muted)', textAlign:'center', marginTop:6 },
+  quickBtn:       { fontSize:11, padding:'5px 12px', borderRadius:20, border:'1px solid var(--border)', background:'var(--bg-hover)', color:'var(--text-secondary)', cursor:'pointer', fontFamily:'inherit', transition:'all 0.15s', whiteSpace:'nowrap' }
 }
