@@ -162,22 +162,33 @@ ${data.revisedPrompt ? `*Prompt used: ${data.revisedPrompt}*` : ''}`, id: Date.n
     setLoading(true)
     setMessages(m => [...m, { role: 'user', text: prompt, id: Date.now() }])
     setInput('')
-    addAIMessage('📚 Creating your eBook — writing chapters now, this takes about 30 seconds…')
+    addAIMessage('📚 Creating your eBook — writing chapters now. This takes up to 60 seconds, please wait…')
     try {
-      // Extract topic from prompt
       const topic = prompt.replace(/^(create|write|generate|make)\s+(an?\s+)?(ebook|e-book|book|guide|manual|report|whitepaper)\s+(about|on|for|titled)?\s*/i, '').trim()
-      const res   = await fetch('/.netlify/functions/generate-ebook', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic: topic || prompt, chapters: 5, userId: user.id })
+      const controller = new AbortController()
+      const timeout    = setTimeout(() => controller.abort(), 90000) // 90 second timeout
+      const res = await fetch('/.netlify/functions/generate-ebook', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic: topic || prompt, chapters: 5, userId: user.id }),
+        signal: controller.signal
       })
+      clearTimeout(timeout)
       const data = await res.json()
       if (!res.ok) { setError(data.error); setMessages(m => m.slice(0, -2)); setLoading(false); return }
       setCredits(c => Math.max(0, c - data.creditCost))
       setMessages(m => [
         ...m.slice(0, -1),
-        { role: 'ai', text: `📚 Your eBook is ready!`, id: Date.now(), ebook: data.ebook }
+        { role: 'ai', text: '📚 Your eBook is ready!', id: Date.now(), ebook: data.ebook }
       ])
-    } catch { setError('eBook generation failed. Please try again.'); setMessages(m => m.slice(0, -2)) }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        setError('eBook generation timed out. Please try again with a simpler topic.')
+      } else {
+        setError('eBook generation failed. Please try again.')
+      }
+      setMessages(m => m.slice(0, -2))
+    }
     setLoading(false)
   }
 
